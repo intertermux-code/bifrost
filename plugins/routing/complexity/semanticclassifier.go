@@ -206,6 +206,8 @@ type SemanticClassifier struct {
 	claimer GenerationClaimer
 	// capture samples classified requests for phrase suggestions. Optional.
 	capture *RequestCapture
+	// lastCaptureNamespace is the capture namespace of the latest serving generation; see captureTarget.
+	lastCaptureNamespace string
 	// deletionDone wakes a warm that finished into a namespace still being
 	// deleted. Retrying before the store has finished would rebuild records the
 	// delete is about to remove, and could repeat for as long as the delete
@@ -281,9 +283,16 @@ func (c *SemanticClassifier) SetRequestCapture(capture *RequestCapture) {
 	c.mu.Unlock()
 }
 
-// captureTarget returns where request capture writes for the serving
-// generation, or a nil store when nothing is serving or no vector store is
-// configured.
+// captureTarget returns where captured vectors are cleaned up: Bifrost's
+// configured store and the capture namespace of the latest serving
+// generation, or a nil store when no vector store is configured.
+//
+// The target outlives its generation. Captured vectors stay as long as their
+// logs whether or not semantic routing is still on, so with semantic routing
+// off, warming or failed, deletes of deleted logs and their retries still
+// reach the last namespace written, and Sweep ages out every capture
+// namespace in the store. The namespace is empty only before any generation
+// has served since start; deletes are then recorded and retried once one has.
 //
 // Captures go to Bifrost's configured vector store whatever the phrase bank
 // uses. A captured vector lives as long as its log, and the embedded store is
@@ -292,14 +301,14 @@ func (c *SemanticClassifier) SetRequestCapture(capture *RequestCapture) {
 func (c *SemanticClassifier) captureTarget() (*RequestCapture, vectorstore.VectorStore, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.active == nil || c.configuredStore == nil {
+	if c.configuredStore == nil {
 		return c.capture, nil, ""
 	}
-	return c.capture, c.configuredStore, c.active.captureNamespace
+	return c.capture, c.configuredStore, c.lastCaptureNamespace
 }
 
 // ForgetCapturedRequests deletes the captured vectors of deleted logs from
-// the serving embedding space's capture namespace; deletes it cannot do are
+// the latest serving embedding space's capture namespace; deletes it cannot do are
 // recorded for RetryCapturedDeletes.
 func (c *SemanticClassifier) ForgetCapturedRequests(ctx context.Context, ids []string) {
 	capture, store, namespace := c.captureTarget()
@@ -762,6 +771,7 @@ func (c *SemanticClassifier) runWarmupWorker() {
 
 				captureNamespace: CaptureNamespace(config.Semantic.Provider, config.Semantic.EmbeddingModel, dimension, config.Semantic.MessageHistoryCount),
 			}
+			c.lastCaptureNamespace = c.active.captureNamespace
 			c.status = SemanticStatusInfo{State: SemanticStatusReady, Loaded: loaded, Total: len(semanticExemplars(config))}
 			if previous != nil {
 				c.cleanupLocalGenerationLocked(previous)

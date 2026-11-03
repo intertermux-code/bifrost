@@ -32,6 +32,7 @@ import (
 
 	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/plugins/prompts"
+	"github.com/maximhq/bifrost/plugins/routing"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
 	"github.com/maximhq/bifrost/plugins/telemetry"
 	"github.com/maximhq/bifrost/transports/v2/bifrost-http/handlers"
@@ -2335,4 +2336,32 @@ func TestApplyBasePath(t *testing.T) {
 
 	s = &BifrostHTTPServer{BasePath: "no-slash", Config: &lib.Config{}}
 	assert.Error(t, s.ApplyBasePath())
+}
+
+// The routing plugin bounds captured request vectors by the logs' retention;
+// if it stopped satisfying the setter, bootstrap and reload would both skip
+// it without a word.
+var _ logRetentionSetter = (*routing.RoutingPlugin)(nil)
+
+type retentionRecorder struct{ days func() int }
+
+func (r *retentionRecorder) SetLogRetention(days func() int) { r.days = days }
+
+// A reload builds a fresh routing plugin, which must get the same log
+// retention as the one bootstrap wired, or its captured vectors outlive their
+// logs. The retention is read at each sweep: 0 while there is no cleaner (logs
+// kept forever), then whatever the cleaner holds now.
+func TestApplyRoutingLogRetentionReadsTheLiveCleaner(t *testing.T) {
+	s := &BifrostHTTPServer{}
+	rec := &retentionRecorder{}
+	s.applyRoutingLogRetention(rec)
+	require.NotNil(t, rec.days)
+	assert.Equal(t, 0, rec.days(), "no cleaner: logs are kept forever")
+
+	s.LogsCleaner = logstore.NewLogsCleaner(nil, logstore.CleanerConfig{RetentionDays: 5}, bifrost.NewNoOpLogger())
+	assert.Equal(t, 5, rec.days(), "a cleaner built after wiring is still read")
+	s.LogsCleaner.UpdateRetentionDays(2)
+	assert.Equal(t, 2, rec.days(), "a retention changed at runtime is read at the next sweep")
+
+	s.applyRoutingLogRetention(struct{}{}) // a plugin without the setter is left alone
 }

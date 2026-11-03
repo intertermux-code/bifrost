@@ -280,6 +280,10 @@ type BifrostHTTPServer struct {
 	// from it.
 	ShellRewriter handlers.ShellRewriter
 
+	// unsubscribeCaptureDeletes releases the log-delete subscription that
+	// drops complexity request capture's vectors with their logs.
+	unsubscribeCaptureDeletes func()
+
 	WebSocketHandler     *handlers.WebSocketHandler
 	NotificationService  *handlers.NotificationService
 	RSSFeedsHandler      *handlers.RSSFeedsHandler
@@ -2632,6 +2636,7 @@ func (s *BifrostHTTPServer) ReloadPlugin(ctx context.Context, name string, path 
 	if routingDecisionPlugin, ok := plugin.(routing.DecisionExecutorSetter); ok {
 		routingDecisionPlugin.SetDecisionRequestExecutor(s.Client.DecisionRequest)
 	}
+	s.applyRoutingLogRetention(plugin)
 	if err := s.SyncLoadedPlugin(ctx, name, plugin, placement, order); err != nil {
 		return err
 	}
@@ -2649,6 +2654,31 @@ func (s *BifrostHTTPServer) ReloadPlugin(ctx context.Context, name string, path 
 		s.WarpHandler.Service().SetLogReader(handlers.NewWarpLogReader(loggerPlugin.GetPluginLogManager()))
 	}
 	return nil
+}
+
+// logRetentionSetter is a plugin that bounds what it keeps by the logs'
+// retention; the routing plugin's request capture is one.
+type logRetentionSetter interface {
+	SetLogRetention(days func() int)
+}
+
+// applyRoutingLogRetention tells a plugin that keeps per-log data how long
+// logs live, so captured request vectors never outlive their logs. It runs at
+// bootstrap and on every reload, since a reload builds a fresh plugin. The
+// retention is read at each sweep rather than once: LogsCleaner is built
+// later in Bootstrap, may be absent (0 means logs are kept forever), and its
+// retention can change at runtime.
+func (s *BifrostHTTPServer) applyRoutingLogRetention(plugin any) {
+	setter, ok := plugin.(logRetentionSetter)
+	if !ok {
+		return
+	}
+	setter.SetLogRetention(func() int {
+		if s.LogsCleaner == nil {
+			return 0
+		}
+		return s.LogsCleaner.RetentionDays()
+	})
 }
 
 // RemovePlugin removes a plugin from the server.
@@ -3047,6 +3077,22 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	})
 	if loggingHandler != nil {
 		loggingHandler.SetTopicLister(s.WarpHandler.Service())
+	}
+	// Complexity request capture keeps vectors under log IDs, so a deleted
+	// log takes its captured vector with it, as Warp's do. The routing plugin
+	// is looked up per delete rather than captured here: a plugin reload
+	// replaces the instance, and the subscription must follow it. Released
+	// first, like Warp's, so a second registration cannot leak the first.
+	if s.unsubscribeCaptureDeletes != nil {
+		s.unsubscribeCaptureDeletes()
+		s.unsubscribeCaptureDeletes = nil
+	}
+	if loggerPlugin != nil {
+		s.unsubscribeCaptureDeletes = loggerPlugin.SubscribeLogDeleteCallback(func(ctx context.Context, ids []string) {
+			if routingPlugin, err := s.getRoutingPlugin(); err == nil {
+				routingPlugin.ForgetComplexityCapturedRequests(ctx, ids)
+			}
+		})
 	}
 	// Read at each sweep rather than once: the cleaner is built in Bootstrap,
 	// after this, and its retention can change at runtime.
@@ -3767,6 +3813,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		routingPlugin.SetChatRequestExecutor(s.Client.ChatCompletionRequest)
 		routingPlugin.SetResponsesRequestExecutor(s.Client.ResponsesRequest)
 		routingPlugin.SetDecisionRequestExecutor(s.Client.DecisionRequest)
+		s.applyRoutingLogRetention(routingPlugin)
 	}
 
 	// Initialize Sidekiq runner for background jobs
