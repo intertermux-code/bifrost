@@ -88615,9 +88615,10 @@
                               "uncovered",
                               "weak",
                               "misrouted",
-                              "mixed"
+                              "mixed",
+                              "template"
                             ],
-                            "description": "Why the cluster needs phrases - no phrase matches it, it matches weakly, it routes confidently to a different tier, or its routing is split."
+                            "description": "Why the cluster needs phrases - no phrase matches it, it matches weakly, it routes confidently to a different tier, its routing is split, or it is one prompt template sent with different fills (its phrases are written from the template's fixed wording)."
                           },
                           "reason": {
                             "type": "string"
@@ -89281,9 +89282,10 @@
                             "uncovered",
                             "weak",
                             "misrouted",
-                            "mixed"
+                            "mixed",
+                            "template"
                           ],
-                          "description": "Why the cluster needs phrases - no phrase matches it, it matches weakly, it routes confidently to a different tier, or its routing is split."
+                          "description": "Why the cluster needs phrases - no phrase matches it, it matches weakly, it routes confidently to a different tier, its routing is split, or it is one prompt template sent with different fills (its phrases are written from the template's fixed wording)."
                         },
                         "reason": {
                           "type": "string"
@@ -89479,9 +89481,10 @@
                         "uncovered",
                         "weak",
                         "misrouted",
-                        "mixed"
+                        "mixed",
+                        "template"
                       ],
-                      "description": "Why the cluster needs phrases - no phrase matches it, it matches weakly, it routes confidently to a different tier, or its routing is split."
+                      "description": "Why the cluster needs phrases - no phrase matches it, it matches weakly, it routes confidently to a different tier, its routing is split, or it is one prompt template sent with different fills (its phrases are written from the template's fixed wording)."
                     },
                     "reason": {
                       "type": "string"
