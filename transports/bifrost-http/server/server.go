@@ -3814,6 +3814,11 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		routingPlugin.SetResponsesRequestExecutor(s.Client.ResponsesRequest)
 		routingPlugin.SetDecisionRequestExecutor(s.Client.DecisionRequest)
 		s.applyRoutingLogRetention(routingPlugin)
+		// Deletes that fail with their log's delete are kept beside the logs
+		// and retried by the capture upkeep, as Warp's are.
+		if s.Config.LogsStore != nil {
+			routingPlugin.SetComplexityCaptureDeleteRecorder(complexityCaptureDeletes{store: s.Config.LogsStore})
+		}
 	}
 
 	// Initialize Sidekiq runner for background jobs
