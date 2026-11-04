@@ -2,6 +2,7 @@ package routing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/logstore"
+	"github.com/maximhq/bifrost/plugins/routing/complexity"
+	"github.com/maximhq/bifrost/plugins/routing/complexity/suggestrun"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -252,4 +255,91 @@ func TestComplexitySuggestionsJobWhenTurnedOff(t *testing.T) {
 	runs, err := store.ListComplexitySuggestionRuns(context.Background(), nil, 10)
 	require.NoError(t, err)
 	assert.Empty(t, runs)
+}
+
+// A run started by hand runs outside the schedule under a fresh UUID, is
+// recorded as manual, and is refused while another is in flight or when suggestions are off.
+func TestComplexitySuggestionsRunNow(t *testing.T) {
+	p, store, _ := suggestionPlugin(t)
+	ctx := context.Background()
+	runID, err := p.StartComplexitySuggestionRunNow(ctx)
+	require.NoError(t, err)
+	_, err = uuid.Parse(runID)
+	require.NoError(t, err, "a manual run ID is the run row's varchar(36) key, so a bare UUID; got %q", runID)
+	assert.Len(t, runID, 36)
+	run := waitForRun(t, store)
+	assert.Equal(t, runID, run.ID)
+	assert.Equal(t, logstore.ComplexitySuggestionTriggerManual, run.TriggeredBy)
+
+	queue := &recordingQueue{}
+	p.SetComplexitySuggestionJobs(queue, &inFlightJobs{job: &tables.TableSidekiqJob{ID: "busy"}})
+	_, err = p.StartComplexitySuggestionRunNow(ctx)
+	require.ErrorIs(t, err, ErrComplexitySuggestionRunInFlight)
+	assert.Empty(t, queue.ids)
+
+	require.NoError(t, p.storeComplexityAnalyzerConfig(captureTestConfig(nil)))
+	_, err = p.StartComplexitySuggestionRunNow(ctx)
+	require.ErrorIs(t, err, ErrComplexitySuggestionsOff)
+}
+
+// A manual run asked for while no phrase bank serves is refused up front,
+// rather than accepted and then recorded as a failed run.
+func TestComplexitySuggestionsRunNowNeedsAServingBank(t *testing.T) {
+	ctx := context.Background()
+	logger := bifrost.NewDefaultLogger(schemas.LogLevelError)
+	p := &RoutingPlugin{logger: logger, semanticClassifier: complexity.NewSemanticClassifier(ctx, logger)}
+	p.semanticClassifier.SetEmbeddingFunc(func(context.Context, *complexity.SemanticConfig, string) ([]float32, error) {
+		return nil, errors.New("embedding provider down")
+	})
+	p.startComplexityCapture(ctx, time.Hour, time.Hour)
+	p.startComplexitySuggestions(ctx, 0)
+	t.Cleanup(func() { _ = p.Cleanup() })
+	store := suggestionTestStore(t)
+	p.SetComplexitySuggestionStore(store, func(context.Context, []string, int) (map[string]string, error) { return nil, nil })
+	require.NoError(t, p.storeComplexityAnalyzerConfig(captureTestConfig(suggestionTestSettings())))
+	require.Eventually(t, func() bool { return p.semanticClassifier.Status().State == complexity.SemanticStatusFailed },
+		2*time.Second, 5*time.Millisecond)
+
+	_, err := p.StartComplexitySuggestionRunNow(ctx)
+	require.ErrorIs(t, err, complexity.ErrNoServingGeneration)
+	p.suggestions.wg.Wait()
+	runs, err := store.ListComplexitySuggestionRuns(ctx, nil, 10)
+	require.NoError(t, err)
+	assert.Empty(t, runs)
+}
+
+// A manual run started after a slot is not that slot's run: the slot still
+// gets its own.
+func TestComplexitySuggestionsManualRunDoesNotFillASlot(t *testing.T) {
+	p, store, _ := suggestionPlugin(t)
+	ctx := context.Background()
+	now := time.Now()
+	started := now.UTC()
+	require.NoError(t, store.UpsertComplexitySuggestionRun(ctx, &logstore.ComplexitySuggestionRun{
+		ID: uuid.NewString(), TriggeredBy: logstore.ComplexitySuggestionTriggerManual,
+		Status: logstore.ComplexitySuggestionRunSucceeded, StartedAt: started, FinishedAt: &started,
+	}))
+
+	require.NoError(t, p.scheduleComplexitySuggestions(ctx, now))
+	p.suggestions.wg.Wait()
+	slot, err := suggestionTestSettings().EffectiveSchedule().LastSlot(now)
+	require.NoError(t, err)
+	runs, err := store.ListComplexitySuggestionRuns(ctx, []string{complexitySuggestionSlotRunID(slot)}, 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1, "the slot ran despite the later manual run")
+	assert.Equal(t, logstore.ComplexitySuggestionTriggerSchedule, runs[0].TriggeredBy)
+}
+
+// Testing a phrase uses the serving bank and the router's own floor.
+func TestComplexitySuggestionsTestPhrases(t *testing.T) {
+	p, _, _ := suggestionPlugin(t)
+	got, err := p.TestComplexitySuggestionPhrases(context.Background(),
+		[]complexity.SuggestionPhrase{{Tier: "COMPLEX", Text: "simple request"}},
+		[]suggestrun.TestExample{{LogID: "log-0", Text: "simple request"}})
+	require.NoError(t, err)
+	require.Len(t, got.Examples, 1)
+	assert.Equal(t, "SIMPLE", got.Examples[0].Current.Tier)
+	assert.Equal(t, "simple exemplar", got.Phrases[0].Nearest.Phrase, "the tested phrase duplicates a live one")
+	assert.InDelta(t, 1, got.Phrases[0].Nearest.Similarity, 1e-6)
+	assert.Equal(t, 1, p.ComplexitySuggestionMessageHistoryCount())
 }
