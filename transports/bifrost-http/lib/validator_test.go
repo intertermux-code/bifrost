@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/vectorstore"
 	"github.com/maximhq/bifrost/framework/warp"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -2580,6 +2581,40 @@ func TestSchemaComplexityAnalyzerDependencies(t *testing.T) {
 			wantError: true,
 		},
 		{
+			name: "suggestions accept run settings",
+			analyzer: complexityAnalyzerSchemaConfig(`,"suggestions":{"enabled":true,"schedule":{"every":"1w","at":"04:30","weekday":"friday","timezone":"Europe/Berlin"},` +
+				`"max_clustered_requests":5000,"min_cluster_requests":10,"provider":"openai","model":"gpt-5","instructions":"be brief"}`),
+		},
+		{
+			name:     "suggestions accept an hourly schedule",
+			analyzer: complexityAnalyzerSchemaConfig(`,"suggestions":{"enabled":true,"schedule":{"every":"6h"}}`),
+		},
+		{
+			name:      "suggestions reject an interval that does not divide a day",
+			analyzer:  complexityAnalyzerSchemaConfig(`,"suggestions":{"enabled":true,"schedule":{"every":"24h"}}`),
+			wantError: true,
+		},
+		{
+			name:      "suggestions reject a malformed start time",
+			analyzer:  complexityAnalyzerSchemaConfig(`,"suggestions":{"enabled":true,"schedule":{"every":"1d","at":"3:00"}}`),
+			wantError: true,
+		},
+		{
+			name:      "suggestions reject unknown schedule fields",
+			analyzer:  complexityAnalyzerSchemaConfig(`,"suggestions":{"enabled":true,"schedule":{"cron":"0 3 * * *"}}`),
+			wantError: true,
+		},
+		{
+			name:      "suggestions reject a provider without a model",
+			analyzer:  complexityAnalyzerSchemaConfig(`,"suggestions":{"enabled":true,"provider":"openai"}`),
+			wantError: true,
+		},
+		{
+			name:      "suggestions reject a cluster budget below 1000",
+			analyzer:  complexityAnalyzerSchemaConfig(`,"suggestions":{"enabled":true,"max_clustered_requests":10}`),
+			wantError: true,
+		},
+		{
 			name:     "semantic fallback none does not require llm config",
 			analyzer: complexityAnalyzerSchemaConfig(`,"semantic":{"provider":"openai","embedding_model":"text-embedding-3-small","fallback":"none"}`),
 		},
@@ -4826,5 +4861,33 @@ func TestValidateConfigSchema_DatasheetOverrideConstraints(t *testing.T) {
 				t.Errorf("validation error = %v, want error = %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// The schema's "every" pattern must accept exactly what the Go schedule
+// parser accepts, or config.json passes schema validation and then fails to
+// load (or the reverse).
+func TestConfigSchemaSuggestionsEveryMatchesParser(t *testing.T) {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(loadLocalSchema(t)))
+	if err != nil {
+		t.Fatalf("parse schema: %v", err)
+	}
+	c := jsonschema.NewCompiler()
+	if err := c.AddResource("config.schema.json", doc); err != nil {
+		t.Fatalf("add schema: %v", err)
+	}
+	schedule, err := c.Compile("config.schema.json#/$defs/complexity_suggestions_schedule")
+	if err != nil {
+		t.Fatalf("compile schedule schema: %v", err)
+	}
+	for _, unit := range []string{"h", "d", "w"} {
+		for n := 1; n <= 40; n++ {
+			every := fmt.Sprintf("%d%s", n, unit)
+			goErr := (&configstore.ComplexitySuggestionsSchedule{Every: every}).Validate()
+			schemaErr := schedule.Validate(map[string]any{"every": every})
+			if (goErr == nil) != (schemaErr == nil) {
+				t.Errorf("%s: parser error %v, schema error %v", every, goErr, schemaErr)
+			}
+		}
 	}
 }
