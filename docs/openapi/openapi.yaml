@@ -1204,6 +1204,8 @@ paths:
     $ref: "./paths/management/routing.yaml#/model-router-status"
   /api/routing/model-routers/{router_id}/status/retry:
     $ref: "./paths/management/routing.yaml#/model-router-status-retry"
+  /api/routing/model-routers/{router_id}/classify:
+    $ref: "./paths/management/routing.yaml#/model-router-classify"
   /api/routing/model-routing-rules:
     $ref: "./paths/management/routing.yaml#/model-routing-rules"
   /api/routing/model-routing-rules/{rule_id}:

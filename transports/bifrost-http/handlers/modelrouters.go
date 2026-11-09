@@ -66,6 +66,7 @@ func (h *RoutingHandler) registerModelRouterRoutes(r *router.Router, middlewares
 	handle(fasthttp.MethodPost, "/api/routing/model-routers/{router_id}/reset", h.resetModelRouter)
 	handle(fasthttp.MethodGet, "/api/routing/model-routers/{router_id}/status", h.getModelRouterStatus)
 	handle(fasthttp.MethodPost, "/api/routing/model-routers/{router_id}/status/retry", h.retryModelRouterWarmup)
+	handle(fasthttp.MethodPost, "/api/routing/model-routers/{router_id}/classify", h.classifyWithModelRouter)
 
 	handle(fasthttp.MethodGet, "/api/routing/model-routing-rules", h.listModelRoutingRules)
 	handle(fasthttp.MethodPost, "/api/routing/model-routing-rules", h.createModelRoutingRule)
@@ -121,17 +122,27 @@ func sendModelRouterLoadError(ctx *fasthttp.RequestCtx, id string, err error) {
 // endpoint, so a misspelled setting is reported instead of dropped.
 func decodeModelRouter(ctx *fasthttp.RequestCtx) (*configstore.ModelRouter, bool) {
 	var payload configstore.ModelRouter
-	decoder := json.NewDecoder(bytes.NewReader(ctx.PostBody()))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&payload); err != nil {
-		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid request payload: %v", err))
-		return nil, false
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		SendError(ctx, fasthttp.StatusBadRequest, "invalid request format: multiple JSON values")
+	if !decodeStrictJSON(ctx, &payload) {
 		return nil, false
 	}
 	return &payload, true
+}
+
+// decodeStrictJSON decodes the body into payload, refusing unknown fields and
+// trailing values so a misspelled setting is an error rather than dropped. It
+// answers 400 and returns false on failure.
+func decodeStrictJSON(ctx *fasthttp.RequestCtx, payload any) bool {
+	decoder := json.NewDecoder(bytes.NewReader(ctx.PostBody()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(payload); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid request payload: %v", err))
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		SendError(ctx, fasthttp.StatusBadRequest, "invalid request format: multiple JSON values")
+		return false
+	}
+	return true
 }
 
 // prepareModelRouter validates a router body for saving: its identity, its
